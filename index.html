@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+</head>
+<body style="font-family: jaf-bernino-sans, \'Lucida Grande\', \'Lucida Sans Unicode\', \'Lucida Sans\', Geneva, Verdana, sans-serif;">
+  <h2>OpenWebGames Test Drive</h2>
+  <pre id='version'></pre>
+  This page contains different web games repurposed as browser benchmarks.
+  <p style='margin-bottom: 0px;'><img style='width: 24px; height: auto; vertical-align: text-top;' src='info_icon.png'><b>System Information:</b>
+  <div style='margin-left: 30px; margin-bottom: 30px;'>
+  User agent: <span id='userAgent'></span> <br>
+  Estimated maximum contiguously allocatable system memory for asm.js heap: <span id='contiguousSystemMemory'></span> <br>
+  Display refresh rate: <span id='refreshRate'>?</span> <br>
+  Number of logical cores: <span id='logicalCores'>?</span> <br>
+  Single core performance: <span id='singleCorePerformance'>?</span> <br>
+  </div>
+
+  <p style='margin-bottom: 0px;'><img style='width: 24px; height: auto; vertical-align: text-top;' src='info_icon.png'><b>How to Run:</b>
+  <div>
+    <ul>
+      <li>Each test runs for a fixed number of frames (typically 2000), and at the end, the timescore is measured and GL output of the final frame verified against a reference image.
+      <li>Click on any of the run buttons below to launch a test. The test spawns in a new popup window, so make sure to <b>always allow popups</b> for this site.
+      <li>For correct results, when running a test, keep the browser window focused and <b>do not press any keys or mouse buttons, or move the mouse when a test is running</b>.
+      <li>Please be patient. Most of the demos are very large in size, and require a sizable download on the first run.
+      <li>A full report of all run tests is collected at the end of this page.
+  </div>
+
+  <b>Options:</b>
+  <div style='margin-left: 30px; margin-bottom: 30px;'>
+    <input type='checkbox' name='noVsync' id='noVsync' /><label for='noVsync'>Disable vsync</label><br>
+    <input type='checkbox' name='cpuProfiler' id='cpuProfiler' /><label for='cpuProfiler'>Show CPU profiler</label><br>
+    <input type='checkbox' name='tortureMode' id='tortureMode' /><label for='tortureMode'>Sequential torture mode: immediately starts test(s) again from the beginning after finishing</label><br>
+    <input type='checkbox' name='parallelTortureMode' id='parallelTortureMode' onclick='updateNumParallelWindowsEnabled();' /><label for='parallelTortureMode' onclick='updateNumParallelWindowsEnabled();'>Parallel torture mode: runs multiple instances of the same test (Best run in conjunction with disable vsync option. Chain with sequential torture mode for added effect)</label><br>
+    <span style='margin-left: 30px'>- Number of parallel pages: <input name='numParallelWindows' id='numParallelWindows' value='3' style='width: 40px;' disabled></input></span>
+  </div>
+  <button onclick="runAllTests()">Run all tests</button>
+  <canvas id='gl' style='display:none;'></canvas>
+  <div id='tests'></div>
+  <script>
+    document.getElementById('noVsync').checked = (location.search.indexOf('novsync') != -1);
+    if (location.search.indexOf('nocpuprofiler') != -1 || location.search.indexOf('autorun') != -1) {
+      document.getElementById('cpuProfiler').checked = false;
+    }
+    document.getElementById('tortureMode').checked = (location.search.indexOf('tortureMode') != -1);
+    document.getElementById('parallelTortureMode').checked = (location.search.indexOf('paralleltorturemode') != -1);
+
+    var supportsNavigatorHardwareConcurrency = navigator.hardwareConcurrency;
+    navigator.hardwareConcurrency = 1; // Currently disable core estimator altogether, because of https://github.com/oftn/core-estimator/issues/8.
+
+    if (navigator.userAgent.indexOf('Trident') != -1 || location.search.indexOf('autorun') != -1 /*also disable core estimator when doing batch runs, since it is unstable*/) {
+      // IE11 hangs to core estimator
+      navigator.hardwareConcurrency = 1;
+    }
+  </script>
+  <script src='core-estimator/core-estimator.min.js'></script>
+  <script src='core-estimator/workload.js'></script>
+  <script>
+  function estimateMaxContiguousSystemMemory() {
+    var test = [4*1024, 3*1024, 2*1024, 2*1024 - 16, 1024 + 768, 1024 + 512, 1024 + 256, 1024, 768, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1];
+    for(var t in test) {
+      var mem = test[t]*1024*1024;
+      try {
+        var a = new ArrayBuffer(mem);
+        if (a.byteLength != mem) throw '';
+        var v = new Float64Array(a);
+        for(var i = 0; i < v.length/1024/1024; ++i) {
+          v[i*1024*1024] = i;
+        }
+        return mem;
+      } catch(e) {
+        // pass
+      }
+    }
+    return 0;
+  }
+
+  function estimateVSyncRate(completionCallback) {
+    var numFramesToRun = 120;
+    var t0 = performance.now();
+    var deltas = [];
+    function tick() {
+      var t1 = performance.now();
+      deltas.push(t1-t0);
+      t0 = t1;
+      if (--numFramesToRun > 0) {
+        requestAnimationFrame(tick);
+      } else {
+        deltas.sort();
+        deltas = deltas.slice((deltas.length/3)|0, ((2*deltas.length+2)/3)|0);
+        var sum = 0;
+        for(var i in deltas) sum += deltas[i];
+        completionCallback(1000.0 / (sum/deltas.length));
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  document.getElementById('userAgent').innerHTML = navigator.userAgent;
+  var contiguousSystemMemory = Math.round(estimateMaxContiguousSystemMemory()/1024/1024) + 'MB';
+  document.getElementById('contiguousSystemMemory').innerHTML = contiguousSystemMemory;
+  var displayRefreshRate = 0;
+  var singleCoreMips = 0;
+  var canonicalizesNansInsideAsmModule = undefined;
+  var canonicalF32NanValueInsideAsmModule = undefined;
+  var canonicalF64NanValueInsideAsmModule = undefined;
+  var canonicalizesNansOutsideAsmModule = undefined;
+  var canonicalF32NanValueOutsideAsmModule = undefined;
+  var canonicalF64NanValueOutsideAsmModule = undefined;
+  var typedArraysAreLittleEndian = undefined;
+  var supportsMathFround = typeof Math.fround !== 'undefined';
+
+  var testVersion = 'OpenWebGamesTestDrive-0.9';
+  document.getElementById('version').innerHTML = testVersion;
+  var tests = [
+    { name: "AngryBots", url: "2015-08-28-emunittest_0.4-AngryBots-u5.1.3f1_hg-e1.34.6-release-prof/index.html", size: 113673082, compiler: 'e1.34.6', engine: 'Unity 5.1.3f1_hg', date: '2015-08-28', noVsync: true, interactive: true},
+    { name: "Stealth", url: "2015-08-29-emunittest_0.4-Stealth-u5.1.3f1_hg-e1.34.6-release-prof/index.html", size: 138618288, compiler: 'e1.34.6', engine: 'Unity 5.1.3f1_hg', date: '2015-08-29', noVsync: true, interactive: true },
+    { name: "SpaceShooter", url: "2015-08-29-emunittest_0.4-SpaceShooter-u5.1.3f1_hg-e1.34.6-release-prof/index.html", size: 44100129, compiler: 'e1.34.6', engine: 'Unity 5.1.3f1_hg', date: '2015-08-29', noVsync: true, interactive: true },
+    { name: "2DPlatformer", url: "2015-08-29-emunittest_0.4-2DPlatformer-u5.1.3f1_hg-e1.34.6-release-prof/index.html", size: 65731609, compiler: 'e1.34.6', engine: 'Unity 5.1.3f1_hg', date: '2015-08-29', noVsync: false, interactive: true },
+//    { name: "Unity AI Benchmark-pthreads", url: "2015-05-22-WebGLBenchmark-pthreads-u5.1.0/index.html", size: 99658449, compiler: 'e1.32.4', engine: 'Unity 5.1.0_hg', date: '2015-05-22', noVsync: true, interactive: false, length: 1200 },
+//    { name: "PhysicsStressTest", url: "2015-10-16-emunittest_0.4-PhysicsStressTest-Urho3D_1.4_e1.34.12-release-prof/12_PhysicsStressTest.html", size: 23150235, compiler: 'e1.34.12', engine: 'Urho3D 1.4', date: '2015-10-16', noVsync: true, interactive: true, available: true, length: 1200 },
+//    { name: "PhysicsStressTest-SIMD", url: "2015-10-16-emunittest_0.4-PhysicsStressTestSIMD-Urho3D_1.4_e1.34.12-release-prof/12_PhysicsStressTest.html", size: 23194532, compiler: 'e1.34.12', engine: 'Urho3D 1.4', date: '2015-10-16', noVsync: true, interactive: true, available: true, length: 1200 },
+//    { name: "SkeletalAnimation", url: "2015-10-16-emunittest_0.4-SkeletalAnimation-Urho3D_1.4_e1.34.12-release-prof/06_SkeletalAnimation.html", size: 23174717, compiler: 'e1.34.12', engine: 'Urho3D 1.4', date: '2015-10-16', noVsync: true, interactive: true, available: true, length: 600 },
+//    { name: "SkeletalAnimation-SIMD-pthreads", url: "2015-12-22-SkeletalAnimation-SIMD-pthreads-Urho3D_1.5_e1.35.14-release-prof/06_SkeletalAnimation.html", size: 40868333, compiler: 'e1.35.14', engine: 'Urho3D 1.5', date: '2015-12-2', noVsync: true, interactive: true, available: true, length: 600 },
+//    { name: "Mandelbrot-SIMD-pthreads", url: "2015-12-22-Mandelbrot-e1.35.14-release-prof/mandelbrot.html", size: 425210, compiler: 'e1.35.14', engine: 'Mandelbrot', date: '2015-12-22', noVsync: false, interactive: true, available: true, length: 1000 },
+//    { name: "MathGeoLib-SIMD", url: "2015-12-22-MathGeoLib-SIMD-e1.35.14-release-prof/MGLBench.html", size: 632792, compiler: 'e1.35.14', engine: 'MathGeoLib', date: '2015-12-22', noVsync: false, interactive: false, available: true },
+    { name: "10kCubes", url: "2015-08-27-10kCubes-release-prof/10kCubes.html?/objects&10000", size: 3736784, compiler: 'e1.34.6', engine: 'gfxapi', date: '2015-08-27', noVsync: true, interactive: true, length: 500 },
+    { name: "SponzaDynamicShadows", url: "2016-03-06-SponzaDynamicShadows/Demos/SponzaDynamicShadows/index.html", size: 35414575, compiler: '', engine: 'Babylon.js 2.4.0-alpha', date: '2016-03-06', noVsync: false, interactive: true, available: true },
+    { name: "Sun Temple", url: "2016-03-10-SunTemple/SunTemple.html", size: 184094733, compiler: '', engine: 'UE 4.10', date: '2016-03-10', noVsync: false, interactive: true, available: true },
+    { name: "Heroes of Paragon", url: "2016-01-27-HoPWebGLDemo/index.html", size: 136363563, compiler: 'Unity 5.2', engine: 'Unity 5.2', date: '2016-01-27', noVsync: true, interactive: true, available: true },
+    { name: "Hurry!", url: "2016-03-07-hurry!/index.html", size: 1087317, compiler: '', engine: '', date: '2016-03-07', noVsync: false, interactive: true, available: true },
+    { name: "Alphabear", url: "2016-03-04-Alphabear/index.html", size: 25695601, compiler: '', engine: 'Unity 5.3', date: '2016-03-07', noVsync: false, interactive: true, available: true }
+  ];
+
+  for(var i = 0; i < tests.length; ++i) {
+    var div = document.createElement('div');
+    var t = tests[i];
+    tests[i].id = i;
+    div.id = 'test_' + i;
+    var unavailable = (typeof t.available !== 'undefined' && !t.available) ? 'disabled' : '';
+    var interactiveOption = t.interactive ? '<button onclick="runTest('+i+', true)" ' + unavailable + '>Run (interactive)</button>' : '';
+
+    div.innerHTML = '<div style="padding-bottom: 30px; height: 125px; margin: 5px;"><div style="padding: 5px; padding-bottom: 0px; font-size:250%; font-weight: bold;">' + t.name + '</div><div style="padding-left: 10px;">Size: ' + Math.round(t.size/1024/1024) + 'MB. ' + t.date + (t.engine ? '. ' + t.engine : '') + '. Emscripten ' + t.compiler + '.</div> <div style="padding-left: 10px;">Timescore: <span id="results_' + i + '">Not yet run.</span><button onclick="runTest('+i+')" style="margin-left: 10px; " ' + unavailable + '>Run (normal)</button>'+interactiveOption+'</div></div>';
+    document.getElementById('tests').appendChild(div);
+  }
+
+  function updateNumParallelWindowsEnabled() {
+    document.getElementById('numParallelWindows').disabled = !document.getElementById('parallelTortureMode').checked;
+  }
+  var runningAllTestsInProgress = false;
+  var currentlyRunningTest = null;
+  var currentlyRunningNoVsync = false;
+  var currentlyRunningCpuProfiler = false;
+  function runTest(idx, interactive) {
+    var noVsync = document.getElementById('noVsync').checked;
+    var cpuProfiler = document.getElementById('cpuProfiler').checked;
+    var test = tests[idx];
+    currentlyRunningTest = test;
+    currentlyRunningNoVsync = noVsync && test.noVsync;
+    currentlyRunningCpuProfiler = cpuProfiler;
+    var url = test.url;
+    function addGET(url, get) {
+      if (url.indexOf('?') != -1) return url + '&' + get;
+      else return url + '?' + get;
+    }
+    if (!interactive) url = addGET(url, 'playback');
+    if (noVsync && test.noVsync) url = addGET(url, 'novsync');
+    if (cpuProfiler) url = addGET(url, 'cpuprofiler');
+    if (test.length) url = addGET(url, 'numframes=' + test.length);
+
+    var parallelTortureMode = document.getElementById('parallelTortureMode').checked;
+    var numSpawnedWindows = parallelTortureMode ? document.getElementById('numParallelWindows').value : 1;
+    for(var i = 0; i < numSpawnedWindows; ++i) {
+      window.open(url);
+    }
+    // If chaining parallel and sequential torture modes, uncheck the parallel torture mode checkbox icon so that the new tests don't multiply when finished!
+    if (document.getElementById('tortureMode').checked) document.getElementById('parallelTortureMode').checked = false;
+    updateNumParallelWindowsEnabled();
+  }
+
+  var gl;
+  var supportsWebGL1 = false;
+  var supportsWebGL2 = false;
+  try {
+    gl = document.getElementById('gl').getContext('webgl2');
+    if (gl) supportsWebGL2 = supportsWebGL1 = true;
+  } catch(e) {
+
+  }
+
+  if (!gl) {
+    try {
+      gl = document.getElementById('gl').getContext('webgl');
+      if (gl) supportsWebGL1 = true;
+    } catch(e) {
+
+    }
+  }
+
+  if (!gl) {
+    try {
+      gl = document.getElementById('gl').getContext('experimental-webgl');
+      if (gl) supportsWebGL1 = true;
+    } catch(e) {
+
+    }
+  }
+
+  Date.prototype.yyyymmddhhmm = function() {
+     var yyyy = this.getFullYear();
+     var mm = this.getMonth() < 9 ? "0" + (this.getMonth() + 1) : (this.getMonth() + 1); // getMonth() is zero-based
+     var dd  = this.getDate() < 10 ? "0" + this.getDate() : this.getDate();
+     var hh = this.getHours() < 10 ? "0" + this.getHours() : this.getHours();
+     var min = this.getMinutes() < 10 ? "0" + this.getMinutes() : this.getMinutes();
+     return yyyy + '-' + mm + '-' + dd + ' ' + hh + ':' + min;
+    };
+
+  // When C code exit()s, we may still have remaining stdout and stderr messages in flight. In that case, we can't close
+  // the browser until all those XHRs have finished, so the following state variables track that all communication is done,
+  // after which we can close.
+  var emrun_num_post_messages_in_flight = 0;
+  var emrun_should_close_itself = false;
+  function postExit(msg) {
+    var http = new XMLHttpRequest();
+    http.onreadystatechange = function() {
+      if (http.readyState == 4 /*DONE*/) {
+        try {
+          // Try closing the current browser window, since it exit()ed itself. This can shut down the browser process
+          // and emrun does not need to kill the whole browser process.
+          if (typeof window !== 'undefined' && window.close) window.close();
+        } catch(e) {}
+      }
+    }
+    http.open("POST", "stdio.html", true);
+    http.send(msg);
+  }
+  var EXITSTATUS = 0;
+  function post(msg) {
+    var http = new XMLHttpRequest();
+    ++emrun_num_post_messages_in_flight;
+    http.onreadystatechange = function() {
+      if (http.readyState == 4 /*DONE*/) {
+        if (--emrun_num_post_messages_in_flight == 0 && emrun_should_close_itself) postExit('^exit^'+EXITSTATUS);
+      }
+    }
+    http.open("POST", "stdio.html", true);
+    http.send(msg);
+  }
+  // If the address contains localhost, or we are running the page from port 6931, we can assume we're running the test runner and should post stdout logs.
+  if (document.URL.search("localhost") != -1 || document.URL.search(":6931/") != -1) {
+    var emrun_http_sequence_number = 1;
+    function emrun_exit() { if (emrun_num_post_messages_in_flight == 0) postExit('^exit^'+EXITSTATUS); else emrun_should_close_itself = true; };
+    function emrun_print(text) { post('^out^'+(emrun_http_sequence_number++)+'^'+encodeURIComponent(text)); }
+    function emrun_printErr(text) { post('^err^'+(emrun_http_sequence_number++)+'^'+encodeURIComponent(text)); }
+
+    // Notify emrun web server that this browser has successfully launched the page.
+    post('^pageload^');
+  } else {
+    // emrun is not being used, no-op.
+    function emrun_exit() {}
+    function emrun_print(text) {}
+    function emrun_printErr(text) {}
+  }
+
+  function padLengthRight(s, len, ch) {
+    if (ch === undefined) ch = ' ';
+    while(s.length < len) s += ch;
+    return s;
+  }
+  function padLengthLeft(s, len, ch) {
+    if (ch === undefined) ch = ' ';
+    while(s.length < len) s = ch + s;
+    return s;
+  }
+
+  function writeFullTestResults() {
+    var s = '<pre>\n' + testVersion + '\n';
+    s += 'Run date: ' + new Date().yyyymmddhhmm() + '\n';
+    s += 'User agent: ' + navigator.userAgent + '\n';
+    if (navigator.buildID) s += 'buildID: ' + navigator.buildID + '\n';
+    if (navigator.appVersion) s += 'appVersion: ' + navigator.appVersion + '\n';
+    if (navigator.mozE10sEnabled) s += 'mozE10sEnabled: true\n';
+    if (navigator.oscpu) s += 'OS: ' + navigator.oscpu + '\n';
+    if (navigator.platform) s += 'Platform: ' + navigator.platform + '\n';
+    s += 'Estimated maximum contiguously allocatable system memory for asm.js heap: ' + contiguousSystemMemory + '\n';
+    s += 'Display refresh rate: ' + displayRefreshRate + 'hz\n';
+    s += 'window.devicePixelRatio: ' + window.devicePixelRatio + '\n';
+    s += 'display resolution in CSS pixels (screen.width x screen.height): ' + screen.width + 'x' + screen.height + '\n';
+    s += 'display resolution in physical pixels: ' + (screen.width*window.devicePixelRatio) + 'x' + (screen.height*window.devicePixelRatio) + '\n';
+    s += 'Number of logical cores: ' + navigator.hardwareConcurrency + '\n';
+    s += 'Single core performance: ' + singleCoreMips + ' MIPS\n';
+
+    var supportedApis = [];
+    var unsupportedApis = [];
+    function storeSupport(apiname, cmp) {
+      if (cmp) supportedApis.push(apiname);
+      else unsupportedApis.push(apiname);
+    }
+
+    var hasBlobConstructor = false
+    try {
+      new Blob();
+      hasBlobConstructor = true;
+    } catch(e) {
+    }    
+    storeSupport('Math.imul()', Math.imul);
+    storeSupport('Math.fround()', supportsMathFround);
+    storeSupport('ArrayBuffer.transfer()', ArrayBuffer.transfer);
+    storeSupport('Web Audio', typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined');
+    storeSupport('Pointer Lock', document.body.requestPointerLock || document.body.mozRequestPointerLock || document.body.webkitRequestPointerLock || document.body.msRequestPointerLock);
+    storeSupport('Fullscreen API', document.body.requestFullscreen || document.body.msRequestFullscreen || document.body.mozRequestFullScreen || document.body.webkitRequestFullscreen);
+    storeSupport('new Blob()', hasBlobConstructor);
+    if (!hasBlobConstructor) storeSupport('BlobBuilder', typeof BlobBuilder !== 'undefined' || typeof MozBlobBuilder !== 'undefined' || typeof WebKitBlobBuilder !== 'undefined');
+    storeSupport('SharedArrayBuffer', typeof SharedArrayBuffer !== 'undefined');
+    storeSupport('navigator.hardwareConcurrency', supportsNavigatorHardwareConcurrency);
+    storeSupport('SIMD.js', typeof SIMD !== 'undefined');
+    storeSupport('Web Workers', typeof Worker !== 'undefined');
+    storeSupport('Gamepad API', navigator.getGamepads || navigator.webkitGetGamepads);
+    storeSupport('IndexedDB', typeof indexedDB !== 'undefined');
+    storeSupport('Visibility API', typeof document.visibilityState !== 'undefined' || typeof document.hidden !== 'undefined');
+    storeSupport('requestAnimationFrame()', typeof requestAnimationFrame !== 'undefined');
+    storeSupport('performance.now()', typeof performance !== 'undefined' && performance.now);
+    storeSupport('WebSockets', typeof WebSocket !== 'undefined');
+    storeSupport('WebRTC', typeof RTCPeerConnection !== 'undefined' || typeof mozRTCPeerConnection !== 'undefined' || typeof webkitRTCPeerConnection !== 'undefined' || typeof msRTCPeerConnection !== 'undefined');
+    storeSupport('Vibration API', navigator.vibrate);
+    storeSupport('Screen Orientation API', window.screen && (window.screen.orientation || window.screen.mozOrientation || window.screen.webkitOrientation || window.screen.msOrientation));
+    storeSupport('Geolocation API', navigator.geolocation);
+    storeSupport('Battery Status API', navigator.getBattery);
+    storeSupport('WebGL 1', supportsWebGL1);
+    storeSupport('WebGL 2', supportsWebGL2);
+
+    if (supportedApis.length > 0) {
+      s += 'Supports the following web APIs:\n    ';
+      s += supportedApis.join('\n    ') + '\n';
+    }
+    if (unsupportedApis.length > 0) {
+      s += 'The following web APIs are not supported:\n    ';
+      s += unsupportedApis.join('\n    ') + '\n';
+    }
+
+    if (typedArraysAreLittleEndian === true) s += 'Typed Arrays are little endian.\n';
+    else if (typedArraysAreLittleEndian === false) s += 'Typed Arrays are big endian.\n';
+    else if (typedArraysAreLittleEndian === 'unknown') s += 'Typed Arrays are of unknown endianness!\n';
+    if (typeof canonicalizesNansInsideAsmModule !== 'undefined') {
+      if (canonicalizesNansInsideAsmModule) {
+         s += 'The JS engine canonicalizes NaNs inside the asm.js module to the F32 value ' + canonicalF32NanValueInsideAsmModule + ' and F64 value ' +canonicalF64NanValueInsideAsmModule + '.\n';
+      } else {
+         s += 'The JS engine does not canonicalize NaNs inside the asm.js module.\n';        
+      }
+    }
+    if (typeof canonicalizesNansOutsideAsmModule !== 'undefined') {
+      if (canonicalizesNansOutsideAsmModule) {
+         s += 'The JS engine canonicalizes NaNs outside the asm.js module to the F32 value ' + canonicalF32NanValueOutsideAsmModule + ' and F64 value ' + canonicalF64NanValueOutsideAsmModule + '.\n';
+      } else {
+         s += 'The JS engine does not canonicalize NaNs outside the asm.js module.\n';        
+      }
+    }
+
+    if (gl) {
+      s += 'GL_VENDOR: ' + gl.getParameter(gl.VENDOR) + '\n';
+      s += 'GL_RENDERER: ' + gl.getParameter(gl.RENDERER) + '\n';
+      s += 'GL_VERSION: ' + gl.getParameter(gl.VERSION) + '\n';
+      s += 'GL_SHADING_LANGUAGE_VERSION: ' + gl.getParameter(gl.SHADING_LANGUAGE_VERSION) + '\n';
+      var WEBGL_debug_renderer_info = gl.getExtension('WEBGL_debug_renderer_info');
+      if (WEBGL_debug_renderer_info) {
+        s += 'GL_UNMASKED_VENDOR_WEBGL: ' + gl.getParameter(WEBGL_debug_renderer_info.UNMASKED_VENDOR_WEBGL) + '\n';
+        s += 'GL_UNMASKED_RENDERER_WEBGL: ' + gl.getParameter(WEBGL_debug_renderer_info.UNMASKED_RENDERER_WEBGL) + '\n';
+      }
+      s += 'WebGL extensions:\n    ' + gl.getSupportedExtensions().join('\n    ') + '\n';
+    } else {
+      s += 'WebGL is not supported.';
+    }
+    s += '\n';
+    s += 'Test Name                            | Total time (lower is better) |   FPS | CPU Time | CPU Idle | Page load time | # of janked frames\n';
+    s += '---------------------------------------------------------------------------------------------------------------------------------------\n';
+    for(var i in tests) {
+      var t = tests[i];
+      if (t.result) {
+        var n = padLengthRight(t.name + '-' + t.date, 37);
+        if (!t.result.error) {
+          var dur = t.result.totalTime + 'ms';
+          if (t.result.noVsync) dur += ' (no vsync)';
+          if (t.result.cpuProfiler) dur += ' (cpuprof)';
+          if (t.result.result == 'FAIL') dur += ' (FAILED! diff: ' + t.result.wrongPixels + ')';
+          dur = padLengthRight(padLengthLeft(dur, 29), 30);
+          var fps = padLengthRight(padLengthLeft(t.result.fps.toFixed(2), 6), 7);
+          var cpuIdle = padLengthRight(padLengthLeft((t.result.cpuIdle * 100).toFixed(2) + '%', 9), 10);
+          var cpuTime = padLengthRight(padLengthLeft(t.result.cpuTime + 'ms', 9), 10);
+          var pageLoadTime = padLengthRight(padLengthLeft(t.result.pageLoadTime.toFixed(2) + 'ms', 15), 16);
+          var numStutterEvents = padLengthLeft(t.result.numStutterEvents+'', 19);
+          s += n + '|' + dur + '|' + fps + '|' + cpuTime + '|' + cpuIdle + '|' + pageLoadTime + '|' + numStutterEvents;
+        } else {
+          s += n + '|' + 'ERROR! ' + t.result.error;
+        }
+        s += '\n';
+      }
+    }
+    s += '                                     |                              |       |          |          |                |                   \n';
+    s += '</pre>';
+    emrun_print(s);
+    document.getElementById('full_test_results').innerHTML = s;
+    var allTestsRun = true;
+    var numTestsFailed = 0;
+    for(var i in tests) {
+      var t = tests[i];
+      if (!t.result) allTestsRun = false;
+      else if (t.result.result != 'PASS') ++numTestsFailed;
+    }
+    if (allTestsRun) emrun_exit(numTestsFailed);
+  }
+
+  function findNextAvailableTestIdx(fromIdx) {
+    for(var i = fromIdx + 1; i < tests.length; ++i) {
+      var t = tests[i];
+      if (t.available === undefined || t.available)
+        return i;
+    }
+    return tests.length;
+  }
+
+  function receiveMessage(event)
+  {
+    var testResults = event.data;
+    if (testResults.error && testResults.error.indexOf('\n') != -1) testResults.error = testResults.error.slice(0, testResults.error.indexOf('\n'));
+    testResults.noVsync = currentlyRunningNoVsync;
+    testResults.cpuProfiler = currentlyRunningCpuProfiler;
+    currentlyRunningTest.result = testResults;
+    var fontColor = (testResults.result == 'PASS') ? '#00A000' : 'red';
+    var result = (testResults.result == 'ERROR') ? ('ERROR! ' + testResults.error) : (testResults.totalTime + 'ms');
+    document.getElementById('results_' + currentlyRunningTest.id).innerHTML = '<span style="color: ' + fontColor + '; font-weight: bold;">' + result + '</span>';
+
+    var tortureMode = document.getElementById('tortureMode').checked;
+
+    if (runningAllTestsInProgress) {
+      var nextTestIdx = findNextAvailableTestIdx(currentlyRunningTest.id);
+      if (tortureMode && nextTestIdx >= tests.length) nextTestIdx = 0;
+      currentlyRunningTest = tests[nextTestIdx];
+      if (currentlyRunningTest) {
+        runTest(currentlyRunningTest.id);
+      } else {
+        runningAllTestsInProgress = false;
+        currentlyRunningTest = null;
+      }
+    } else if (tortureMode) {
+      // Rerun the same test again.
+      runTest(currentlyRunningTest.id);
+    } else {
+      currentlyRunningTest = null;
+    }
+    writeFullTestResults();
+  }
+  window.addEventListener("message", receiveMessage, false);
+
+  function runAllTests(noVsync) {
+    runningAllTestsInProgress = true;
+    runTest(0);
+  }
+
+  // http://stackoverflow.com/questions/985272/selecting-text-in-an-element-akin-to-highlighting-with-your-mouse
+  function selectText(element) {
+    var doc = document, text = doc.getElementById(element), range, selection;    
+    if (doc.body.createTextRange) {
+        range = document.body.createTextRange();
+        range.moveToElementText(text);
+        range.select();
+    } else if (window.getSelection) {
+        selection = window.getSelection();        
+        range = document.createRange();
+        range.selectNodeContents(text);
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+  }
+  </script>
+  <br>
+  <h3>Results<button style='margin-left:10px;' onclick="selectText('full_test_results')">Select</button></h3>
+  <div id='full_test_results' onclick="selectText('full_test_results')"><pre>Measuring...</pre></div>
+  <script>
+    function performance_now() { return performance.now(); }
+    if (!Math.fround) Math.fround = function(x) { return x; }
+    function CpuBenchmark(stdlib, foreign, buffer) {
+      "use asm";
+      var performance_now = foreign.performance_now;
+      var Math_fround = stdlib.Math.fround;
+      var i32 = new stdlib.Int32Array(buffer);
+      var f32 = new stdlib.Float32Array(buffer);
+      var f64 = new stdlib.Float64Array(buffer);
+      function cpuBenchmark() {
+        var t0 = 0.0, t1 = 0.0, i = 0, a = 0, b = 0, c = 0;
+        a = performance_now()|0; b = performance_now()|0; c = performance_now()|0; t0 = +performance_now(); i = 0;
+        do { a = a + c | 0; b = b + a | 0; c = c + b | 0; a = a + c | 0; b = b + a | 0; c = c + b | 0; a = a + c | 0; b = b + a | 0; c = c + b | 0; i = i + 1 | 0; } while((i | 0) != 1048576);
+        t1 = +performance_now(); i32[0>>2] = c; return t1 - t0;
+      }
+
+      // Inside asm.js module
+      function doesCanonicalizeNans() {
+        var f = Math_fround(0.0);
+        var d = 0.0;
+        var canonicalizes = 0;
+        // Single-precision
+        i32[0] = -1;
+        f = Math_fround(f32[0]);
+        f32[1] = f;
+        if ((i32[1]|0) != -1) canonicalizes = 1;
+        i32[0] = 0x7FC00000;
+        f = Math_fround(f32[0]);
+        f32[1] = f;
+        if ((i32[1]|0) != 0x7FC00000) canonicalizes = 1;
+        // Double-precision
+        i32[2] = -1;
+        i32[3] = -1;
+        d = +f64[1];
+        f64[2] = d;
+        if ((i32[4]|0) != -1) canonicalizes = 1;
+        if ((i32[5]|0) != -1) canonicalizes = 1;
+        i32[2] = 0;
+        i32[3] = 0x7FC00000;
+        d = +f64[1];
+        f64[2] = d;
+        if ((i32[4]|0) != 0) canonicalizes = 1;
+        if ((i32[5]|0) != 0x7FC00000) canonicalizes = 1;
+        return canonicalizes|0;
+      }
+      return { cpuBenchmark: cpuBenchmark, doesCanonicalizeNans: doesCanonicalizeNans };
+    }
+    var heap = new ArrayBuffer(0x10000);
+    var i32 = new Int32Array(heap);
+    var u32 = new Uint32Array(heap);
+    var u16 = new Uint16Array(heap);
+    u32[64] = 0x7FFF0100;
+    if (u16[128] === 0x7FFF && u16[129] === 0x0100) typedArraysAreLittleEndian = false;
+    else if (u16[128] === 0x0100 && u16[129] === 0x7FFF) typedArraysAreLittleEndian = true;
+    else typedArraysAreLittleEndian = 'unknown';
+    // else leave typedArraysAreLittleEndian undefined, we got unknown endianness
+    var f32 = new Float32Array(heap);
+    var f64 = new Float64Array(heap);
+    var benchmark = CpuBenchmark(window, { performance_now: performance_now }, heap);
+    // Do a few measurements
+    var seconds = []; for(var i = 0; i < 100; ++i) seconds.push(benchmark.cpuBenchmark()/1000);
+    // Take best result as an indicator of CPU performance
+    var secondsAvg = seconds.sort()[0];
+    // Alternative: remove some outliers & compute the average of the remaining.
+//    seconds = seconds.sort().slice(30, 75); var secondsAvg = 0; for(var i in seconds) secondsAvg += seconds[i]; secondsAvg /= seconds.length;
+    // Compute MIPS performance count
+    var instructions = 1048576/*# of loop iterations*/ * 10/*# of adds in iteration*/;
+    singleCoreMips = Math.round(instructions / secondsAvg / 1000000/*ips->mips*/);
+    document.getElementById('singleCorePerformance').innerHTML = Math.round(singleCoreMips) + ' MIPS';
+
+    // Outside asm.js module
+    function doesCanonicalizeNans() {
+      var f = Math.fround(0.0);
+      var d = 0.0;
+      var canonicalizes = 0;
+      // Single-precision
+      i32[0] = -1;
+      f = Math.fround(f32[0]);
+      f32[1] = f;
+      if ((i32[1]|0) != -1) canonicalizes = 1;
+      i32[0] = 0x7FC00000;
+      f = Math.fround(f32[0]);
+      f32[1] = f;
+      if ((i32[1]|0) != 0x7FC00000) canonicalizes = 1;
+      // Double-precision
+      i32[2] = -1;
+      i32[3] = -1;
+      d = +f64[1];
+      f64[2] = d;
+      if ((i32[4]|0) != -1) canonicalizes = 1;
+      if ((i32[5]|0) != -1) canonicalizes = 1;
+      i32[2] = 0;
+      i32[3] = 0x7FF80000;
+      d = +f64[1];
+      f64[2] = d;
+      if ((i32[4]|0) != 0) canonicalizes = 1;
+      if ((i32[5]|0) != 0x7FF80000) canonicalizes = 1;
+      return canonicalizes;
+    }
+    canonicalizesNansInsideAsmModule = benchmark.doesCanonicalizeNans();
+    canonicalF32NanValueInsideAsmModule = '0x' + padLengthLeft(u32[1].toString(16), 8, '0');
+    canonicalF64NanValueInsideAsmModule = '0x' + padLengthLeft(u32[5].toString(16), 8, '0') + padLengthLeft(u32[4].toString(16), 8, '0');
+    canonicalizesNansOutsideAsmModule = doesCanonicalizeNans();
+    canonicalF32NanValueOutsideAsmModule = '0x' + padLengthLeft(u32[1].toString(16), 8, '0');
+    canonicalF64NanValueOutsideAsmModule = '0x' + padLengthLeft(u32[5].toString(16), 8, '0') + padLengthLeft(u32[4].toString(16), 8, '0');
+
+    var numCoresChecked = false;
+    var vsyncChecked = false;
+
+    function autoRun() {
+      if (numCoresChecked && vsyncChecked && !currentlyRunningTest && location.search.indexOf('autorun') != -1) {
+        runAllTests(0);
+      }
+    }
+
+    navigator.getHardwareConcurrency(function(cores) {
+      document.getElementById('logicalCores').innerHTML = '' + cores;
+      writeFullTestResults();
+      numCoresChecked = true;
+      autoRun();
+    });
+
+    estimateVSyncRate(function(rate) {
+      displayRefreshRate = Math.round(rate);
+      var t = displayRefreshRate + 'hz';
+      if (displayRefreshRate != 60) t += '<img style=\'padding-left: 10px; width: 24px; height: auto; vertical-align: text-top;\' src="warning_icon.png">Your system has an uncommon display refresh rate. 60hz is most common. Performance numbers obtained in this benchmark are not comparable to other browsers if they do not have the same refresh rate.';
+      document.getElementById('refreshRate').innerHTML = t;
+      writeFullTestResults();
+      vsyncChecked = true;
+      autoRun();
+    });
+  </script>
+</body>
+</html>

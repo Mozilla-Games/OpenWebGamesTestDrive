@@ -1,0 +1,14 @@
+This suite can be run from the command line, via the 'emrun' browser automation.
+To run the suite and capture results to a file, type
+
+    python run.py [--browser=/path/to/firefox] > results_file.txt 2>&1
+
+For more command line options that can be passed to run.py, type
+
+    python emrun.py --help
+
+Notes:
+
+  - When running with Firefox, a clean temporary Firefox profile is used (hack emrun.py or run.py if this is not desirable)
+  - results_file.txt receives a full test results after each test is run, so only the "last" matrix is the file is generally interesting.
+  - If you run into any issues, email jjylanki@mozilla.com.

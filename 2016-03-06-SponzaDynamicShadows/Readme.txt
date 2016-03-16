@@ -1,0 +1,1 @@
+This is SponzaDynamicShadows sample from https://github.com/BabylonJS/Samples.
